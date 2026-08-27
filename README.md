@@ -1,4 +1,4 @@
-<img src="docs/logo.svg" width="96" align="right" alt="">
+<img src="docs/logo.svg" width="104" alt="">
 
 # MiniDLNA Configuration
 

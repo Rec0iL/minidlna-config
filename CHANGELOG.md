@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0
+## 1.0.0
 
 A complete rewrite, replacing the original Tkinter implementation.
 
