@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=MiniDLNA Configuration
+GenericName=DLNA Media Server Settings
+Comment=Choose which folders minidlna shares on your network
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=AudioVideo;
+Keywords=dlna;upnp;media;server;minidlna;streaming;
+StartupNotify=true
+StartupWMClass=minidlna-config

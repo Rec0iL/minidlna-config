@@ -1,0 +1,11 @@
+# The GUI needs Qt for Python. Prefer your distribution's package:
+#   Fedora / Nobara : sudo dnf install python3-pyside6
+#   Debian / Ubuntu : sudo apt install python3-pyside6.qtwidgets
+#   Arch            : sudo pacman -S pyside6
+#
+# Or install into a local virtual environment:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+PySide6>=6.5
+
+# Everything else is standard library. The tests need nothing extra:
+#   python3 -m unittest discover -s tests
