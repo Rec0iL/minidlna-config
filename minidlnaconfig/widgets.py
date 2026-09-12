@@ -18,7 +18,16 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QCursor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -196,6 +205,92 @@ class KindSelector(QWidget):
             chip.setChecked(bool(kinds & chip.member))
 
 
+class ViewSwitch(QWidget):
+    """A segmented control with an indicator that slides between options."""
+
+    changed = Signal(int)
+
+    def __init__(self, labels: List[str], parent=None):
+        super().__init__(parent)
+        self._labels = labels
+        self._index = 0
+        self._offset = 0.0
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        self.setFixedHeight(34)
+
+        font = QFont(self.font())
+        font.setPointSizeF(9.8)
+        font.setWeight(QFont.DemiBold)
+        self.setFont(font)
+
+        metrics = self.fontMetrics()
+        self._segment = max(metrics.horizontalAdvance(text) for text in labels) + 34
+        self.setFixedWidth(self._segment * len(labels) + 8)
+
+        self._animation = QPropertyAnimation(self, b"offset", self)
+        self._animation.setDuration(220)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
+
+    def current_index(self) -> int:
+        return self._index
+
+    def set_index(self, index: int) -> None:
+        if index == self._index or not 0 <= index < len(self._labels):
+            return
+        self._index = index
+        self._animation.stop()
+        self._animation.setStartValue(self._offset)
+        self._animation.setEndValue(float(index))
+        self._animation.start()
+        self.changed.emit(index)
+
+    def get_offset(self) -> float:
+        return self._offset
+
+    def set_offset(self, value: float) -> None:
+        self._offset = value
+        self.update()
+
+    offset = Property(float, get_offset, set_offset)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = int((event.position().x() - 4) // self._segment)
+            self.set_index(max(0, min(len(self._labels) - 1, index)))
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        track = QPainterPath()
+        track.addRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        painter.fillPath(track, _rgba("#FFFFFF", 0.045))
+        painter.setPen(QPen(_rgba("#FFFFFF", 0.08), 1))
+        painter.drawPath(track)
+
+        indicator = QRectF(
+            4 + self._offset * self._segment, 4,
+            self._segment, rect.height() - 7,
+        )
+        path = QPainterPath()
+        path.addRoundedRect(indicator, indicator.height() / 2, indicator.height() / 2)
+        gradient = QLinearGradient(indicator.topLeft(), indicator.bottomRight())
+        gradient.setColorAt(0.0, _rgba(theme.VIOLET, 0.85))
+        gradient.setColorAt(1.0, _rgba(theme.INDIGO, 0.85))
+        painter.fillPath(path, QBrush(gradient))
+
+        for index, label in enumerate(self._labels):
+            segment = QRectF(4 + index * self._segment, 0, self._segment, rect.height())
+            near = 1.0 - min(1.0, abs(self._offset - index))
+            colour = QColor(theme.TEXT)
+            colour.setAlphaF(0.50 + 0.50 * near)
+            painter.setPen(colour)
+            painter.drawText(segment, Qt.AlignCenter, label)
+        painter.end()
+
+
 class StatusPill(QWidget):
     """Service state indicator with a slow pulse while the server is up."""
 
@@ -311,6 +406,12 @@ class FolderRow(GlassPanel):
 
         self.badge = WarningBadge(self)
         top.addWidget(self.badge)
+
+        # How much of this folder minidlna has actually indexed.
+        self.index_label = QLabel("")
+        self.index_label.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 12px;")
+        top.addWidget(self.index_label)
+
         top.addStretch(1)
 
         self.open_button = self._icon_button("↗", "Open this folder in your file manager")
@@ -381,6 +482,27 @@ class FolderRow(GlassPanel):
         self.path_edit.setText(path)
         self.name_label.setText(self.folder.name)
         self.changed.emit()
+
+    def set_index_stats(self, files: Optional[int], size: int = 0) -> None:
+        """Show what minidlna has indexed under this folder.
+
+        ``None`` means the media database could not be read, in which case the
+        row simply says nothing rather than implying the folder is empty.
+        """
+        if files is None:
+            self.index_label.setText("")
+            self.index_label.setToolTip("")
+            return
+        if files == 0:
+            self.index_label.setText("nothing indexed")
+            self.index_label.setToolTip(
+                "minidlna has not indexed anything here. The folder may be empty, "
+                "hold no media it recognises, or not have been scanned yet."
+            )
+        else:
+            from .library import format_count, format_size
+            self.index_label.setText(f"{format_count(files, 'file')} · {format_size(size)}")
+            self.index_label.setToolTip("Indexed by minidlna")
 
     def apply_health(self, exists: bool, readable: Optional[bool]) -> None:
         """Show why this folder will not be served, if that is the case."""

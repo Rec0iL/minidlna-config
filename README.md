@@ -12,7 +12,7 @@ means "pictures and video", restarting the right service afterwards, and
 working out for yourself why a folder you added shows up empty on your TV.
 This does those parts for you.
 
-![The media folder list, with media type chips and a warning on an offline drive](docs/screenshot.png)
+![The media folder list, with media type chips, indexed counts, and a warning on an offline drive](docs/screenshot.png)
 
 ## What it does
 
@@ -24,6 +24,9 @@ This does those parts for you.
 - **Warns you when a folder will not work.** A folder that does not exist, or
   that the account minidlna runs as cannot read, is flagged in the list
   instead of silently serving nothing.
+- **Shows what was actually indexed.** Every folder carries its file count and
+  size, and the Library view lists the media minidlna found — so you can tell
+  a folder that is shared but empty from one that is genuinely serving files.
 - **Applies in one step.** Saving and restarting minidlna happen together,
   behind a single authorisation prompt.
 - **Leaves the rest of your config alone.** Only `media_dir=` lines are
@@ -81,6 +84,19 @@ minidlna has not noticed.
 The **Server** menu starts, stops and restarts the service, and opens its web
 interface.
 
+### The Library view
+
+The **Library** tab reads minidlna's own index and shows what it holds: totals
+per media type, and a searchable list of every file, with length, resolution
+and size. Sort by newest, name or size, filter by type, and double-click a row
+to open its folder.
+
+![The Library view: totals per media type and a searchable list of indexed files](docs/screenshot-library.png)
+
+This is the quickest way to answer "why can my TV not see this file" — if it is
+not listed here, minidlna never indexed it, and the folder list will usually
+say why. The database is opened read-only and is never modified.
+
 ![The folder picker, with mounted drives in the sidebar](docs/screenshot-picker.png)
 
 ### Why a folder shows up empty
@@ -131,6 +147,8 @@ dependencies and no display server.
 | `minidlnaconfig/models.py` | Media types and folder entries |
 | `minidlnaconfig/config.py` | Parsing and atomic rewriting of minidlna.conf |
 | `minidlnaconfig/service.py` | Service status, media-type guessing, permission and mount checks |
+| `minidlnaconfig/library.py` | Reading minidlna's media index |
+| `minidlnaconfig/librarypage.py` | The Library view |
 | `minidlnaconfig/privilege.py` | pkexec wrapper |
 | `minidlnaconfig/helper.py` | The only code that runs as root |
 | `minidlnaconfig/background.py` | Animated backdrop |

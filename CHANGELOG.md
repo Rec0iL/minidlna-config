@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.0
+
+### Added
+
+- A **Library** view showing what minidlna has actually indexed: totals per
+  media type, and a searchable, sortable list of every file with its length,
+  resolution and size. Double-clicking a row opens its folder.
+- Each folder in the list now shows how many files are indexed underneath it
+  and how much they take up, or says so when nothing is indexed - which
+  distinguishes a folder that is shared but empty from one that is working.
+- The Library view offers a rebuild when the media database is missing or
+  empty, and reports files indexed outside the configured folders.
+
+minidlna's index is opened read-only and is never written to.
+
 ## 1.0.0
 
 A complete rewrite, replacing the original Tkinter implementation.

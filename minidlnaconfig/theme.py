@@ -150,6 +150,57 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 QScrollBar:horizontal {{ height: 0px; }}
 
+/* -------------------------------------------------------------- combo box */
+
+QComboBox {{
+    background: {GLASS};
+    border: 1px solid {STROKE};
+    border-radius: 9px;
+    padding: 7px 12px;
+    min-width: 104px;
+}}
+QComboBox:hover {{ background: {GLASS_STRONG}; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox::down-arrow {{ image: none; }}
+QComboBox QAbstractItemView {{
+    background: #10162A;
+    border: 1px solid {STROKE};
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: {VIOLET};
+    outline: none;
+}}
+
+/* --------------------------------------------------------- library table */
+
+QTreeWidget#libraryTable {{
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid {STROKE_SOFT};
+    border-radius: 12px;
+    outline: none;
+    alternate-background-color: transparent;
+}}
+QTreeWidget#libraryTable::item {{
+    padding: 6px 8px;
+    border: none;
+}}
+QTreeWidget#libraryTable::item:hover {{ background: rgba(255, 255, 255, 0.055); }}
+QTreeWidget#libraryTable::item:selected {{
+    background: rgba(139, 92, 255, 0.30);
+    color: {TEXT};
+}}
+QTreeWidget#libraryTable QHeaderView::section {{
+    background: transparent;
+    color: {TEXT_FAINT};
+    border: none;
+    border-bottom: 1px solid {STROKE_SOFT};
+    padding: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+}}
+QTreeWidget#libraryTable QHeaderView::section:hover {{ color: {TEXT_DIM}; }}
+
 /* ------------------------------------------------------------------ menus */
 
 QMenu {{

@@ -19,6 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QCursor, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QStackedWidget,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -31,12 +32,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import privilege, resources, theme
+from . import library, privilege, resources, theme
 from .background import AuroraBackground
 from .config import MinidlnaConfig
 from .models import MediaFolder, MediaKind
 from .service import ServiceController, guess_kinds, mount_points, readable_by
-from .widgets import FolderRow, GlassPanel, StatusPill, ToastHost
+from .librarypage import LibraryPage
+from .widgets import FolderRow, GlassPanel, StatusPill, ToastHost, ViewSwitch
 
 CORNER_RADIUS = 18
 RESIZE_MARGIN = 6
@@ -176,6 +178,7 @@ class MainWindow(QWidget):
         self._populate()
         self._reset_baseline()
         self._refresh_status()
+        self._refresh_index_counts()
 
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(5000)
@@ -204,7 +207,7 @@ class MainWindow(QWidget):
 
         body.addWidget(self._build_header())
         body.addLayout(self._build_toolbar())
-        body.addWidget(self._build_list(), 1)
+        body.addWidget(self._build_pages(), 1)
         body.addWidget(self._build_footer())
 
     def _build_header(self) -> QWidget:
@@ -240,18 +243,26 @@ class MainWindow(QWidget):
 
     def _build_toolbar(self) -> QHBoxLayout:
         layout = QHBoxLayout()
-        layout.setSpacing(10)
+        layout.setSpacing(12)
+
+        self.view_switch = ViewSwitch(["Folders", "Library"], self)
+        self.view_switch.setToolTip(
+            "Folders: what minidlna is told to share\n"
+            "Library: what it has actually indexed"
+        )
+        self.view_switch.changed.connect(self._on_view_changed)
+        layout.addWidget(self.view_switch)
 
         self.count_label = QLabel()
         self.count_label.setObjectName("sectionLabel")
         layout.addWidget(self.count_label)
         layout.addStretch(1)
 
-        add_button = QPushButton("＋  Add folders")
-        add_button.setCursor(QCursor(Qt.PointingHandCursor))
-        add_button.setToolTip("Add media folders  (Ctrl+O)\nYou can also drag folders into this window")
-        add_button.clicked.connect(self._add_folders)
-        layout.addWidget(add_button)
+        self.add_button = QPushButton("＋  Add folders")
+        self.add_button.setCursor(QCursor(Qt.PointingHandCursor))
+        self.add_button.setToolTip("Add media folders  (Ctrl+O)\nYou can also drag folders into this window")
+        self.add_button.clicked.connect(self._add_folders)
+        layout.addWidget(self.add_button)
 
         return layout
 
@@ -273,6 +284,47 @@ class MainWindow(QWidget):
 
         self.scroll.setWidget(container)
         return self.scroll
+
+    def _build_pages(self) -> QWidget:
+        self.stack = QStackedWidget(self)
+        self.stack.addWidget(self._build_list())
+
+        self.library_page = LibraryPage(self)
+        self.library_page.rebuildRequested.connect(lambda: self._service("rescan"))
+        self.stack.addWidget(self.library_page)
+        return self.stack
+
+    def _on_view_changed(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.add_button.setVisible(index == 0)
+        self.count_label.setVisible(index == 0)
+        if index == 1:
+            self._sync_library_source()
+            self.library_page.refresh()
+
+    def _sync_library_source(self) -> None:
+        self.library_page.set_source(
+            library.database_path(self.config.db_dir),
+            [row.folder.path for row in self._rows],
+        )
+
+    def _refresh_index_counts(self) -> None:
+        """Annotate each folder row with what minidlna has indexed there."""
+        stats = library.read_stats(
+            library.database_path(self.config.db_dir),
+            [row.folder.path for row in self._rows],
+        )
+        if not stats.available:
+            for row in self._rows:
+                row.set_index_stats(None)
+            return
+        by_path = {folder.path: folder for folder in stats.folders}
+        for row in self._rows:
+            folder = by_path.get(row.folder.path)
+            if folder is None:
+                row.set_index_stats(None)
+            else:
+                row.set_index_stats(folder.files, folder.size)
 
     def _build_empty_state(self) -> QWidget:
         panel = GlassPanel(self, radius=16, fill=0.025, stroke=0.07)
@@ -639,6 +691,7 @@ class MainWindow(QWidget):
             self._reset_baseline()
             self.toasts.post(result.message or "Configuration applied", "success")
             QTimer.singleShot(600, self._refresh_status)
+            QTimer.singleShot(900, self._refresh_index_counts)
             if self._close_after_apply:
                 self._close_after_apply = False
                 QTimer.singleShot(0, self.close)
@@ -669,6 +722,7 @@ class MainWindow(QWidget):
         self._set_busy(False)
         if result.ok:
             self.toasts.post(result.message or "Done", "success")
+            QTimer.singleShot(900, self._refresh_index_counts)
         elif result.cancelled:
             self.toasts.post("Cancelled", "info")
         else:
@@ -680,6 +734,7 @@ class MainWindow(QWidget):
         self.config = MinidlnaConfig.load(self.config.path)
         self._populate()
         self._reset_baseline()
+        self._refresh_index_counts()
         self.toasts.post("Reloaded from disk", "info")
 
     # -------------------------------------------------------- drag and drop
