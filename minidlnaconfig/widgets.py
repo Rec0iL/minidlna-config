@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QPen,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
@@ -210,9 +211,10 @@ class ViewSwitch(QWidget):
 
     changed = Signal(int)
 
-    def __init__(self, labels: List[str], parent=None):
+    def __init__(self, labels: List[str], parent=None, padding: int = 34):
         super().__init__(parent)
         self._labels = labels
+        self._badges = {}
         self._index = 0
         self._offset = 0.0
         self.setCursor(QCursor(Qt.PointingHandCursor))
@@ -224,7 +226,7 @@ class ViewSwitch(QWidget):
         self.setFont(font)
 
         metrics = self.fontMetrics()
-        self._segment = max(metrics.horizontalAdvance(text) for text in labels) + 34
+        self._segment = max(metrics.horizontalAdvance(text) for text in labels) + padding
         self.setFixedWidth(self._segment * len(labels) + 8)
 
         self._animation = QPropertyAnimation(self, b"offset", self)
@@ -243,6 +245,14 @@ class ViewSwitch(QWidget):
         self._animation.setEndValue(float(index))
         self._animation.start()
         self.changed.emit(index)
+
+    def set_badge(self, index: int, level: str) -> None:
+        """Mark a segment: "" for none, otherwise "error", "warning" or "info"."""
+        if level:
+            self._badges[index] = level
+        else:
+            self._badges.pop(index, None)
+        self.update()
 
     def get_offset(self) -> float:
         return self._offset
@@ -288,6 +298,80 @@ class ViewSwitch(QWidget):
             colour.setAlphaF(0.50 + 0.50 * near)
             painter.setPen(colour)
             painter.drawText(segment, Qt.AlignCenter, label)
+
+            level = self._badges.get(index)
+            if level:
+                dot = {"error": theme.RED, "warning": theme.AMBER}.get(level, theme.CYAN)
+                width = self.fontMetrics().horizontalAdvance(label)
+                x = segment.center().x() + width / 2 + 6
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(dot))
+                painter.drawEllipse(QRectF(x, segment.center().y() - 7, 7, 7))
+        painter.end()
+
+
+class Toggle(QAbstractButton):
+    """An on/off switch."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        self.setFixedSize(42, 24)
+        self._position = 0.0
+        self._animation = QPropertyAnimation(self, b"position", self)
+        self._animation.setDuration(140)
+        self.toggled.connect(self._animate)
+
+    def _animate(self, checked: bool) -> None:
+        self._animation.stop()
+        self._animation.setStartValue(self._position)
+        self._animation.setEndValue(1.0 if checked else 0.0)
+        self._animation.start()
+
+    def get_position(self) -> float:
+        return self._position
+
+    def set_position(self, value: float) -> None:
+        self._position = value
+        self.update()
+
+    position = Property(float, get_position, set_position)
+
+    def setChecked(self, checked: bool) -> None:           # noqa: N802
+        super().setChecked(checked)
+        self._animation.stop()
+        self._position = 1.0 if checked else 0.0
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = rect.height() / 2
+        track = QPainterPath()
+        track.addRoundedRect(rect, radius, radius)
+
+        off = _rgba("#FFFFFF", 0.10)
+        on = _rgba(theme.VIOLET, 0.90)
+        mix = QColor(
+            int(off.red() + (on.red() - off.red()) * self._position),
+            int(off.green() + (on.green() - off.green()) * self._position),
+            int(off.blue() + (on.blue() - off.blue()) * self._position),
+            int(off.alpha() + (on.alpha() - off.alpha()) * self._position),
+        )
+        if not self.isEnabled():
+            mix.setAlphaF(mix.alphaF() * 0.5)
+        painter.fillPath(track, mix)
+        painter.setPen(QPen(_rgba("#FFFFFF", 0.14), 1))
+        painter.drawPath(track)
+
+        travel = rect.width() - rect.height()
+        knob = QRectF(rect.left() + 3 + travel * self._position, rect.top() + 3,
+                      rect.height() - 6, rect.height() - 6)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 235 if self.isEnabled() else 120))
+        painter.drawEllipse(knob)
         painter.end()
 
 

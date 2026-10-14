@@ -130,6 +130,19 @@ QLabel#folderName {{ font-size: 15px; font-weight: 600; }}
 QLabel#emptyTitle {{ font-size: 17px; font-weight: 600; color: {TEXT_DIM}; }}
 QLabel#emptyHint  {{ color: {TEXT_FAINT}; font-size: 13px; }}
 
+/* ----------------------------------------------------------- scan progress */
+
+QProgressBar#scanBar {{
+    background: rgba(255,255,255,0.08);
+    border: none;
+    border-radius: 3px;
+}}
+QProgressBar#scanBar::chunk {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 {VIOLET}, stop:1 {CYAN});
+    border-radius: 3px;
+}}
+
 /* ------------------------------------------------------------- scrollbars */
 
 QScrollArea {{ background: transparent; border: none; }}
@@ -189,6 +202,10 @@ QTreeWidget#libraryTable::item:selected {{
     background: rgba(139, 92, 255, 0.30);
     color: {TEXT};
 }}
+QTreeWidget#libraryTable QHeaderView {{
+    background: transparent;
+    border: none;
+}}
 QTreeWidget#libraryTable QHeaderView::section {{
     background: transparent;
     color: {TEXT_FAINT};
@@ -200,6 +217,25 @@ QTreeWidget#libraryTable QHeaderView::section {{
     letter-spacing: 0.8px;
 }}
 QTreeWidget#libraryTable QHeaderView::section:hover {{ color: {TEXT_DIM}; }}
+
+/* ------------------------------------------------------- lists and text */
+
+QListWidget {{
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid {STROKE_SOFT};
+    border-radius: 12px;
+    outline: none;
+    padding: 4px;
+}}
+QListWidget::item {{ padding: 9px 10px; border-radius: 8px; }}
+QListWidget::item:hover {{ background: rgba(255, 255, 255, 0.055); }}
+QListWidget::item:selected {{ background: rgba(139, 92, 255, 0.30); color: {TEXT}; }}
+QTextEdit {{
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid {STROKE_SOFT};
+    border-radius: 12px;
+    padding: 8px;
+}}
 
 /* ------------------------------------------------------------------ menus */
 

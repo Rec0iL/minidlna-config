@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import List, Optional
 
 from PySide6.QtCore import (
     QObject,
+    QUrl,
     QRunnable,
     QSize,
     Qt,
@@ -16,7 +18,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QCursor, QFont, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QFont, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QStackedWidget,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -32,12 +35,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import library, privilege, resources, theme
+from . import backups, library, privilege, resources, scan, theme
 from .background import AuroraBackground
 from .config import MinidlnaConfig
 from .models import MediaFolder, MediaKind
 from .service import ServiceController, guess_kinds, mount_points, readable_by
+from .backupdialog import BackupDialog
+from .devicespage import DevicesPage
+from .drivewatch import DriveWatcher
 from .librarypage import LibraryPage
+from .prefs import Preferences
+from .problemspage import ProblemsPage
+from .scanwatch import ScanWatcher
+from .settingspage import SettingsPage
+from .tray import TrayController
 from .widgets import FolderRow, GlassPanel, StatusPill, ToastHost, ViewSwitch
 
 CORNER_RADIUS = 18
@@ -147,9 +158,10 @@ class MainWindow(QWidget):
     def __init__(self, config_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("MiniDLNA Configuration")
-        self.resize(980, 720)
-        self.setMinimumSize(720, 520)
+        self.resize(1040, 740)
+        self.setMinimumSize(880, 540)
         self.setAcceptDrops(True)
+        QApplication.setQuitOnLastWindowClosed(False)
 
         native_frame = os.environ.get("MINIDLNA_GUI_NATIVE_FRAME", "") == "1"
         self._frameless = not native_frame
@@ -167,6 +179,13 @@ class MainWindow(QWidget):
         self._busy = False
         self._rows: List[FolderRow] = []
         self._pool = QThreadPool.globalInstance()
+        self.prefs = Preferences()
+        self.tray: Optional[TrayController] = None
+        self._quitting = False
+        self._tray_hint_shown = False
+        self._was_active: Optional[bool] = None
+        self._expect_down_until = 0.0
+        self._scan_text = ""
 
         self.background = AuroraBackground(self)
         if self._frameless:
@@ -184,6 +203,28 @@ class MainWindow(QWidget):
         self._status_timer.setInterval(5000)
         self._status_timer.timeout.connect(self._refresh_status)
         self._status_timer.start()
+
+        self._last_library_refresh = 0.0
+        self.scan_watcher = ScanWatcher(self.service, self._scan_source, self)
+        self.scan_watcher.progress.connect(self._on_scan_progress)
+        self.scan_watcher.finished.connect(self._on_scan_finished)
+        self.scan_watcher.start()
+
+        self.drive_watcher = DriveWatcher(
+            self.service,
+            lambda: [folder.path for folder in self.config.folders],
+            lambda: self.service.unit,
+            self,
+        )
+        self.drive_watcher.appeared.connect(self._on_drives_appeared)
+        self.drive_watcher.vanished.connect(self._on_drives_vanished)
+        self.drive_watcher.returned.connect(self._on_drives_returned)
+        self.drive_watcher.start()
+
+        self._setup_tray()
+
+        self._sync_pages()
+        QTimer.singleShot(1500, self.problems_page.refresh)
 
         self._install_shortcuts()
 
@@ -206,6 +247,7 @@ class MainWindow(QWidget):
         root.addLayout(body, 1)
 
         body.addWidget(self._build_header())
+        body.addWidget(self._build_banner())
         body.addLayout(self._build_toolbar())
         body.addWidget(self._build_pages(), 1)
         body.addWidget(self._build_footer())
@@ -228,6 +270,22 @@ class MainWindow(QWidget):
         self.subtitle.setTextInteractionFlags(Qt.TextSelectableByMouse)
         text_column.addWidget(self.subtitle)
 
+        self.scan_box = QWidget(panel)
+        scan_layout = QHBoxLayout(self.scan_box)
+        scan_layout.setContentsMargins(0, 4, 0, 0)
+        scan_layout.setSpacing(10)
+        self.scan_bar = QProgressBar(self.scan_box)
+        self.scan_bar.setObjectName("scanBar")
+        self.scan_bar.setTextVisible(False)
+        self.scan_bar.setFixedHeight(6)
+        self.scan_bar.setRange(0, 1000)
+        scan_layout.addWidget(self.scan_bar, 1)
+        self.scan_label = QLabel(self.scan_box)
+        self.scan_label.setObjectName("subtitle")
+        scan_layout.addWidget(self.scan_label)
+        self.scan_box.setVisible(False)
+        text_column.addWidget(self.scan_box)
+
         layout.addLayout(text_column, 1)
 
         self.status_pill = StatusPill(panel)
@@ -241,14 +299,44 @@ class MainWindow(QWidget):
 
         return panel
 
+    def _build_banner(self) -> QWidget:
+        """A dismissible notice, shown when a skipped drive has come back."""
+        self.banner = GlassPanel(self, radius=14, fill=0.07, stroke=0.20)
+        layout = QHBoxLayout(self.banner)
+        layout.setContentsMargins(16, 10, 10, 10)
+        layout.setSpacing(12)
+
+        self.banner_label = QLabel()
+        self.banner_label.setWordWrap(True)
+        layout.addWidget(self.banner_label, 1)
+
+        self.banner_action = QPushButton("Rebuild library")
+        self.banner_action.setObjectName("primary")
+        self.banner_action.setCursor(QCursor(Qt.PointingHandCursor))
+        self.banner_action.clicked.connect(self._banner_rebuild)
+        layout.addWidget(self.banner_action)
+
+        dismiss = QPushButton("Dismiss")
+        dismiss.setCursor(QCursor(Qt.PointingHandCursor))
+        dismiss.clicked.connect(lambda: self.banner.setVisible(False))
+        layout.addWidget(dismiss)
+
+        self.banner.setVisible(False)
+        return self.banner
+
     def _build_toolbar(self) -> QHBoxLayout:
         layout = QHBoxLayout()
         layout.setSpacing(12)
 
-        self.view_switch = ViewSwitch(["Folders", "Library"], self)
+        self.view_switch = ViewSwitch(
+            ["Folders", "Library", "Problems", "Devices", "Settings"], self, padding=26
+        )
         self.view_switch.setToolTip(
             "Folders: what minidlna is told to share\n"
-            "Library: what it has actually indexed"
+            "Library: what it has actually indexed\n"
+            "Problems: what the log says is wrong, and a disk-versus-index check\n"
+            "Devices: who is connected\n"
+            "Settings: server options and app preferences"
         )
         self.view_switch.changed.connect(self._on_view_changed)
         layout.addWidget(self.view_switch)
@@ -292,15 +380,53 @@ class MainWindow(QWidget):
         self.library_page = LibraryPage(self)
         self.library_page.rebuildRequested.connect(lambda: self._service("rescan"))
         self.stack.addWidget(self.library_page)
+
+        self.problems_page = ProblemsPage(self)
+        self.problems_page.rebuildRequested.connect(lambda: self._service("rescan"))
+        self.problems_page.summaryChanged.connect(self._on_problem_summary)
+        self.stack.addWidget(self.problems_page)
+
+        self.devices_page = DevicesPage(self)
+        self.stack.addWidget(self.devices_page)
+
+        self.settings_page = SettingsPage(self.prefs, self)
+        self.settings_page.changed.connect(self._recompute_dirty)
+        self.settings_page.preferenceChanged.connect(self._on_preference)
+        self.settings_page.backupsRequested.connect(self._show_backups)
+        self.stack.addWidget(self.settings_page)
         return self.stack
 
     def _on_view_changed(self, index: int) -> None:
+        previous = self.stack.currentIndex()
+        if previous == 3 and index != 3:
+            self.devices_page.deactivate()
         self.stack.setCurrentIndex(index)
         self.add_button.setVisible(index == 0)
         self.count_label.setVisible(index == 0)
+        self._sync_pages()
         if index == 1:
             self._sync_library_source()
             self.library_page.refresh()
+        elif index == 2:
+            self.problems_page.activate()
+        elif index == 3:
+            self.devices_page.activate()
+        elif index == 4:
+            self.settings_page.set_backup_count(len(backups.list_backups(self.config.path)))
+
+    def _sync_pages(self) -> None:
+        """Tell the pages that read the log or the server what to look at."""
+        db_path = library.database_path(self.config.db_dir)
+        log_dir = self.config.setting("log_dir") or ""
+        self.problems_page.set_context(
+            self.service.unit, log_dir, db_path,
+            [(folder.path, folder.kinds) for folder in self.config.folders],
+        )
+        self.devices_page.set_context(self.config.port, self.service.unit, log_dir)
+
+    def _on_problem_summary(self, errors: int, warnings: int) -> None:
+        level = "error" if errors else "warning" if warnings else ""
+        self.view_switch.set_badge(2, level)
 
     def _sync_library_source(self) -> None:
         self.library_page.set_source(
@@ -310,10 +436,12 @@ class MainWindow(QWidget):
 
     def _refresh_index_counts(self) -> None:
         """Annotate each folder row with what minidlna has indexed there."""
-        stats = library.read_stats(
+        self._apply_index_stats(library.read_stats(
             library.database_path(self.config.db_dir),
             [row.folder.path for row in self._rows],
-        )
+        ))
+
+    def _apply_index_stats(self, stats: "library.LibraryStats") -> None:
         if not stats.available:
             for row in self._rows:
                 row.set_index_stats(None)
@@ -325,6 +453,53 @@ class MainWindow(QWidget):
                 row.set_index_stats(None)
             else:
                 row.set_index_stats(folder.files, folder.size)
+
+    def _scan_source(self):
+        """What the scan watcher needs, evaluated on the UI thread."""
+        return (
+            library.database_path(self.config.db_dir),
+            [row.folder.path for row in self._rows],
+            [(folder.path, folder.kinds) for folder in self.config.folders],
+        )
+
+    def _on_scan_progress(self, state: "scan.ScanState", stats: "library.LibraryStats") -> None:
+        fraction = state.fraction
+        if fraction is None:
+            self.scan_bar.setRange(0, 0)
+            found = library.format_count(state.indexed, "file")
+            self.scan_label.setText(f"Scanning · {found} so far")
+        else:
+            self.scan_bar.setRange(0, 1000)
+            self.scan_bar.setValue(int(fraction * 1000))
+            self.scan_label.setText(
+                f"Scanning · {state.indexed:,} of ~{state.expected:,} files  ·  "
+                f"{int(fraction * 100)}%"
+            )
+        self.scan_box.setVisible(True)
+        self._scan_text = (
+            f"scanning · {int(fraction * 100)}%" if fraction is not None else "scanning"
+        )
+
+        self._apply_index_stats(stats)
+        # Re-reading the Library view rebuilds its table, so do not do it on
+        # every tick of a scan.
+        now = time.monotonic()
+        if self.stack.currentIndex() == 1 and now - self._last_library_refresh >= 3.0:
+            self._last_library_refresh = now
+            self.library_page.set_scanning(True)
+            self.library_page.apply_stats(stats)
+
+    def _on_scan_finished(self, stats: "library.LibraryStats", announce: bool) -> None:
+        self.scan_box.setVisible(False)
+        self._scan_text = ""
+        QTimer.singleShot(1000, self.problems_page.refresh)
+        self._apply_index_stats(stats)
+        self.library_page.set_scanning(False)
+        self.library_page.apply_stats(stats)
+        if announce and stats.available:
+            message = f"Library scan finished · {library.format_count(stats.files, 'file')} indexed"
+            self.toasts.post(message, "success")
+            self._notify("Library scan finished", message.split(" · ", 1)[1])
 
     def _build_empty_state(self) -> QWidget:
         panel = GlassPanel(self, radius=16, fill=0.025, stroke=0.07)
@@ -387,7 +562,7 @@ class MainWindow(QWidget):
             (QKeySequence.Open, self._add_folders),
             (QKeySequence.Save, lambda: self._apply(restart=True)),
             (QKeySequence.Refresh, self._revert),
-            (QKeySequence.Quit, self.close),
+            (QKeySequence.Quit, self.quit_app),
         ):
             action = QAction(self)
             action.setShortcut(keys)
@@ -405,6 +580,7 @@ class MainWindow(QWidget):
         for folder in self.config.folders:
             self._add_row(folder)
 
+        self.settings_page.load(self.config.setting_values())
         self._sync_chrome()
 
     def _add_row(self, folder: MediaFolder) -> FolderRow:
@@ -574,8 +750,9 @@ class MainWindow(QWidget):
             self.title_bar.dirty_dot.setVisible(self._dirty)
 
     def _snapshot(self) -> tuple:
-        """The folder list as comparable plain data."""
-        return tuple((row.folder.kinds.letters, row.folder.path) for row in self._rows)
+        """The folder list and settings as comparable plain data."""
+        folders = tuple((row.folder.kinds.letters, row.folder.path) for row in self._rows)
+        return folders, tuple(sorted(self.settings_page.values().items()))
 
     def _reset_baseline(self) -> None:
         """Record the current state as matching what is on disk."""
@@ -595,6 +772,21 @@ class MainWindow(QWidget):
     def _refresh_status(self) -> None:
         status = self.service.status()
         self.status_pill.set_state(status.active, status.summary)
+
+        if self.tray is not None:
+            text = status.summary
+            if status.active and self._scan_text:
+                text += f" · {self._scan_text}"
+            self.tray.set_status(text)
+
+        if (
+            self._was_active
+            and not status.active
+            and time.monotonic() > self._expect_down_until
+        ):
+            self.toasts.post("minidlna stopped running", "warning", timeout=7000)
+            self._notify("minidlna stopped", "The server is no longer running.")
+        self._was_active = status.active
 
     # ----------------------------------------------------------- operations
 
@@ -629,10 +821,9 @@ class MainWindow(QWidget):
         menu.exec(self.service_button.mapToGlobal(self.service_button.rect().bottomLeft()))
 
     def _open_web_interface(self) -> None:
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
-
-        QDesktopServices.openUrl(QUrl(f"http://localhost:{self.config.port}"))
+        # minidlna rejects requests whose Host is a name ("DNS rebinding
+        # attack suspected"), so address it by IP.
+        QDesktopServices.openUrl(QUrl(f"http://127.0.0.1:{self.config.port}"))
 
     def _set_busy(self, busy: bool, label: str = "") -> None:
         self._busy = busy
@@ -654,8 +845,32 @@ class MainWindow(QWidget):
             self.config.path = chosen
 
         folders = self._current_folders()
-        text = self.config.render(folders)
+        settings = self.settings_page.values()
 
+        notes = self.settings_page.warnings_for(self.config.setting_values(), settings)
+        if notes and not self._confirm_settings(notes):
+            self._quitting = False
+            self._close_after_apply = False
+            return
+
+        text = self.config.render(folders, settings)
+        self._write_config(text, restart=restart, rescan=rescan)
+
+    def _confirm_settings(self, notes: List[str]) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Apply these changes?")
+        box.setText("Some of the changes you made have side effects.")
+        box.setInformativeText("\n\n".join(notes))
+        apply_button = box.addButton("Apply anyway", QMessageBox.AcceptRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is apply_button
+
+    def _write_config(
+        self, text: str, restart: bool, rescan: bool, reload_rows: bool = False
+    ) -> None:
+        """Save ``text`` as the configuration, elevating only if needed."""
         # Fast path: if we own the file there is no reason to involve polkit.
         if not self.config.needs_root() and not restart and not rescan:
             try:
@@ -663,8 +878,7 @@ class MainWindow(QWidget):
             except OSError as exc:
                 self.toasts.post(f"Could not save: {exc}", "error", timeout=7000)
                 return
-            self.config.folders = folders
-            self._reset_baseline()
+            self._after_write(text, reload_rows)
             message = "Saved" + (f" · backup {os.path.basename(backup)}" if backup else "")
             self.toasts.post(message, "success")
             return
@@ -673,6 +887,8 @@ class MainWindow(QWidget):
         unit = self.service.unit
         db_dir = self.config.db_dir
         path = self.config.path
+        if restart or rescan:
+            self._expect_down_until = time.monotonic() + 20
 
         def work():
             return privilege.apply_config(
@@ -680,18 +896,36 @@ class MainWindow(QWidget):
             )
 
         signals = _TaskSignals(self)
-        signals.done.connect(lambda result: self._on_applied(result, folders))
+        signals.done.connect(
+            lambda result: self._on_applied(result, text, restart, rescan, reload_rows)
+        )
         signals.done.connect(lambda _: signals.deleteLater())
         self._pool.start(_Task(work, signals))
 
-    def _on_applied(self, result: privilege.Result, folders: List[MediaFolder]) -> None:
+    def _after_write(self, text: str, reload_rows: bool) -> None:
+        """The file on disk now holds ``text``; bring the window in line."""
+        self.config.adopt(text)
+        if reload_rows:
+            self._populate()
+            self._refresh_index_counts()
+        else:
+            self.settings_page.load(self.config.setting_values())
+        self.drive_watcher.forget()
+        self._sync_pages()
+        self._reset_baseline()
+
+    def _on_applied(
+        self, result: privilege.Result, text: str,
+        restart: bool, rescan: bool, reload_rows: bool = False,
+    ) -> None:
         self._set_busy(False)
         if result.ok:
-            self.config.folders = folders
-            self._reset_baseline()
+            self._after_write(text, reload_rows)
             self.toasts.post(result.message or "Configuration applied", "success")
             QTimer.singleShot(600, self._refresh_status)
-            QTimer.singleShot(900, self._refresh_index_counts)
+            if restart or rescan:
+                self.scan_watcher.kick()
+                QTimer.singleShot(2500, self.problems_page.refresh)
             if self._close_after_apply:
                 self._close_after_apply = False
                 QTimer.singleShot(0, self.close)
@@ -700,6 +934,7 @@ class MainWindow(QWidget):
             # A failed or cancelled save must not close the window and lose
             # the edits it was asked to save.
             self._close_after_apply = False
+            self._quitting = False
         if result.cancelled:
             self.toasts.post("Cancelled — nothing was changed", "info")
         elif not result.ok:
@@ -710,19 +945,23 @@ class MainWindow(QWidget):
         if self._busy:
             return
         self._set_busy(True, "Working…")
+        if action in ("stop", "restart", "rescan"):
+            self._expect_down_until = time.monotonic() + 20
         unit = self.service.unit
         db_dir = self.config.db_dir
 
         signals = _TaskSignals(self)
-        signals.done.connect(self._on_service_done)
+        signals.done.connect(lambda result: self._on_service_done(result, action))
         signals.done.connect(lambda _: signals.deleteLater())
         self._pool.start(_Task(lambda: privilege.control_service(action, unit, db_dir), signals))
 
-    def _on_service_done(self, result: privilege.Result) -> None:
+    def _on_service_done(self, result: privilege.Result, action: str = "") -> None:
         self._set_busy(False)
         if result.ok:
             self.toasts.post(result.message or "Done", "success")
-            QTimer.singleShot(900, self._refresh_index_counts)
+            if action in ("start", "restart", "rescan"):
+                self.scan_watcher.kick()
+                QTimer.singleShot(2500, self.problems_page.refresh)
         elif result.cancelled:
             self.toasts.post("Cancelled", "info")
         else:
@@ -736,6 +975,120 @@ class MainWindow(QWidget):
         self._reset_baseline()
         self._refresh_index_counts()
         self.toasts.post("Reloaded from disk", "info")
+
+    # ------------------------------------------------------ tray and drives
+
+    def _setup_tray(self) -> None:
+        if self.tray is not None or not TrayController.is_available():
+            return
+        self.tray = TrayController(resources.app_icon(), self)
+        self.tray.showRequested.connect(self._show_from_tray)
+        self.tray.restartRequested.connect(lambda: self._service("restart"))
+        self.tray.rebuildRequested.connect(lambda: self._service("rescan"))
+        self.tray.openWebRequested.connect(self._open_web_interface)
+        self.tray.quitRequested.connect(self.quit_app)
+        self.tray.set_visible(self.prefs.get("tray_icon"))
+
+    def _on_preference(self, key: str, value: bool) -> None:
+        if key == "tray_icon":
+            if value and self.tray is None:
+                self._setup_tray()
+            if value and self.tray is None:
+                self.toasts.post("This desktop has no system tray to show an icon in", "warning")
+            elif self.tray is not None:
+                self.tray.set_visible(value)
+        elif key == "close_to_tray" and value and not (self.tray and self.tray.is_visible()):
+            self.toasts.post("Turn on the tray icon too, or the window cannot be reached", "warning")
+
+    def _hide_to_tray(self) -> bool:
+        return bool(
+            self.tray is not None
+            and self.tray.is_visible()
+            and self.prefs.get("close_to_tray")
+        )
+
+    def _show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if self.stack.currentIndex() == 3:
+            self.devices_page.activate()
+
+    def _notify(self, title: str, message: str) -> None:
+        """A desktop notification, when the tray is there and they are wanted."""
+        if self.tray is not None and self.prefs.get("notifications"):
+            self.tray.notify(title, message)
+
+    def quit_app(self) -> None:
+        """Really quit, rather than hiding to the tray."""
+        self._quitting = True
+        if not self.isVisible():
+            self._show_from_tray()
+        self.close()
+
+    @staticmethod
+    def _names(paths: List[str]) -> str:
+        return ", ".join(os.path.basename(p.rstrip("/")) or p for p in paths)
+
+    def _recheck_health(self) -> None:
+        for row in self._rows:
+            self._check_row_health(row)
+
+    def _on_drives_appeared(self, paths: List[str]) -> None:
+        self._recheck_health()
+        names = self._names(paths)
+        if self.prefs.get("auto_restart_on_drive") and not self._busy:
+            self.toasts.post(f"{names} is available again — rebuilding the library", "info")
+            self._notify("Drive available", f"{names} is back. Rebuilding the library.")
+            self._service("rescan")
+            return
+        plural = len(paths) > 1
+        self.banner_label.setText(
+            f"{names} {'were' if plural else 'was'} not available when minidlna started, "
+            f"but {'are' if plural else 'is'} now. Rebuild the library to include "
+            f"{'them' if plural else 'it'}."
+        )
+        self.banner.setVisible(True)
+        self._notify("Drive available", f"{names} is back. Rebuild the library to include it.")
+
+    def _on_drives_vanished(self, paths: List[str]) -> None:
+        self._recheck_health()
+        names = self._names(paths)
+        self.toasts.post(f"{names} is no longer available", "warning", timeout=7000)
+        self._notify("Media folder missing", f"{names} is no longer available.")
+
+    def _on_drives_returned(self, paths: List[str]) -> None:
+        self._recheck_health()
+
+    def _banner_rebuild(self) -> None:
+        self.banner.setVisible(False)
+        self._service("rescan")
+
+    # --------------------------------------------------------------- backups
+
+    def _show_backups(self) -> None:
+        if not self.config.path:
+            return
+        found = backups.list_backups(self.config.path)
+        if not found:
+            self.toasts.post("There are no earlier versions of this file yet", "info")
+            return
+        dialog = BackupDialog("".join(self.config.lines), found, self)
+        dialog.restoreRequested.connect(self._restore_text)
+        dialog.exec()
+
+    def _restore_text(self, text: str) -> None:
+        if self._busy:
+            return
+        if self._dirty:
+            answer = QMessageBox.question(
+                self, "Discard unsaved changes?",
+                "Restoring replaces the configuration, including the changes you "
+                "have not saved yet. Continue?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._write_config(text, restart=True, rescan=False, reload_rows=True)
 
     # -------------------------------------------------------- drag and drop
 
@@ -824,13 +1177,24 @@ class MainWindow(QWidget):
         super().mousePressEvent(event)
 
     def closeEvent(self, event):
+        if not self._quitting and self._hide_to_tray():
+            event.ignore()
+            self.devices_page.deactivate()
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray.notify(
+                    "Still running", "MiniDLNA is in the tray. Use its menu to quit."
+                )
+            return
+
         if not self._dirty:
-            event.accept()
+            self._accept_close(event)
             return
 
         box = QMessageBox(self)
         box.setWindowTitle("Unsaved changes")
-        box.setText("You have unsaved changes to your media folders.")
+        box.setText("You have unsaved changes to your configuration.")
         box.setInformativeText("Apply them before closing?")
         box.setIcon(QMessageBox.Warning)
         apply_button = box.addButton("Apply and close", QMessageBox.AcceptRole)
@@ -841,10 +1205,18 @@ class MainWindow(QWidget):
 
         clicked = box.clickedButton()
         if clicked is discard_button:
-            event.accept()
+            self._accept_close(event)
         elif clicked is apply_button:
             event.ignore()
             self._close_after_apply = True
+            self._quitting = True
             self._apply(restart=True)
         else:
             event.ignore()
+            self._quitting = False
+
+    def _accept_close(self, event) -> None:
+        # Qt is told not to quit on its own (the tray keeps the app alive),
+        # so a real close has to end the application explicitly.
+        event.accept()
+        QTimer.singleShot(0, QApplication.quit)

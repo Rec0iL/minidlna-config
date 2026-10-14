@@ -10,8 +10,9 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from . import settings as settings_schema
 from .models import MediaFolder, MediaKind
 
 #: Locations checked when no config path is supplied, in priority order.
@@ -141,20 +142,52 @@ class MinidlnaConfig:
 
     # ---------------------------------------------------------------- writing
 
-    def render(self, folders: Optional[List[MediaFolder]] = None) -> str:
+    def setting_values(self) -> Dict[str, str]:
+        """Current raw value of every editable setting; empty when unset."""
+        return {
+            spec.key: self.setting(spec.key) or ""
+            for spec in settings_schema.SPECS
+        }
+
+    def adopt(self, text: str) -> None:
+        """Take ``text`` as the file's content after it has been saved."""
+        self.lines = text.splitlines(keepends=True)
+        self.exists = True
+        self._parse()
+
+    def render(
+        self,
+        folders: Optional[List[MediaFolder]] = None,
+        settings: Optional[Dict[str, str]] = None,
+    ) -> str:
         """Return the full file content with media_dir entries replaced.
 
         The new block is placed where the first existing ``media_dir`` line
         was, so the surrounding explanatory comments still make sense.
+
+        ``settings`` maps keys to new values (empty removes the key). Only
+        keys whose value differs from the file are touched.
         """
         if folders is None:
             folders = self.folders
 
         new_block = [f"media_dir={folder.spec}\n" for folder in folders]
 
+        source = self.lines
+        if settings:
+            source = list(self.lines)
+            for key, value in settings.items():
+                spec = settings_schema.SPEC_BY_KEY.get(key)
+                if spec is None:
+                    continue
+                wanted = settings_schema.normalise(spec, value)
+                current = settings_schema.normalise(spec, self.setting(key) or "")
+                if wanted != current:
+                    source = _set_setting(source, key, wanted)
+
         keep: List[str] = []
         insert_at: Optional[int] = None
-        for line in self.lines:
+        for line in source:
             if not line.lstrip().startswith("#") and _MEDIA_DIR_RE.match(line):
                 if insert_at is None:
                     insert_at = len(keep)
@@ -196,6 +229,40 @@ class MinidlnaConfig:
         if not self.path:
             raise ValueError("no config path set")
         return atomic_write(self.path, text, backup=backup)
+
+
+def _set_setting(lines: List[str], key: str, value: str) -> List[str]:
+    """Return ``lines`` with ``key`` set to ``value`` (removed when empty).
+
+    An existing uncommented line is replaced where it stands; a new key goes
+    after the last other setting so it sits with its neighbours.
+    """
+    result: List[str] = []
+    placed = False
+    last_setting = -1
+    for line in lines:
+        if not line.lstrip().startswith("#"):
+            match = _SETTING_RE.match(line)
+            if match and match.group("key") == key:
+                if value and not placed:
+                    result.append(f"{key}={value}\n")
+                    placed = True
+                continue                      # drop the old line / duplicates
+            if match and not _MEDIA_DIR_RE.match(line):
+                last_setting = len(result)
+        result.append(line)
+
+    if value and not placed:
+        entry = f"{key}={value}\n"
+        if last_setting >= 0:
+            if not result[last_setting].endswith("\n"):
+                result[last_setting] += "\n"
+            result.insert(last_setting + 1, entry)
+        else:
+            if result and not result[-1].endswith("\n"):
+                result[-1] += "\n"
+            result.append(entry)
+    return result
 
 
 def atomic_write(dest: str, text: str, backup: bool = True) -> str:

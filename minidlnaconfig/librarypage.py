@@ -105,6 +105,7 @@ class LibraryPage(QWidget):
         self._db_path = ""
         self._folders: List[str] = []
         self._stats = library.LibraryStats()
+        self._scanning = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -205,7 +206,16 @@ class LibraryPage(QWidget):
 
     def refresh(self) -> None:
         """Re-read the database and rebuild the whole view."""
-        self._stats = library.read_stats(self._db_path, self._folders)
+        self.apply_stats(library.read_stats(self._db_path, self._folders))
+
+    def set_scanning(self, scanning: bool) -> None:
+        """Say so while minidlna is still indexing, so a partial or empty
+        library is not mistaken for a broken one."""
+        self._scanning = scanning
+
+    def apply_stats(self, stats: "library.LibraryStats") -> None:
+        """Redraw the view from an already-read summary."""
+        self._stats = stats
         total = max(1, self._stats.files)
         for kind, card in self.cards.items():
             count, size = self._stats.kinds.get(kind, (0, 0))
@@ -220,9 +230,15 @@ class LibraryPage(QWidget):
         usable = stats.available and stats.files > 0
 
         self.table.setVisible(usable)
-        self.rebuild_button.setVisible(not usable)
+        self.rebuild_button.setVisible(not usable and not self._scanning)
         for widget in (self.search, self.kind_filter, self.order):
             widget.setEnabled(usable)
+
+        if self._scanning and not usable:
+            self.status.setText(
+                "minidlna is scanning your folders. Files appear here as they are indexed."
+            )
+            return
 
         if not stats.available:
             reason = stats.error or "unavailable"
@@ -277,7 +293,9 @@ class LibraryPage(QWidget):
         parts = [library.format_count(total, "file") + " matched"]
         if shown < total:
             parts.append(f"showing the first {shown:,} — narrow the search to see more")
-        if stats.updated:
+        if self._scanning:
+            parts.append("still scanning")
+        elif stats.updated:
             parts.append("index updated " + _ago(stats.updated))
         if stats.unmatched:
             parts.append(

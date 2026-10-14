@@ -29,6 +29,9 @@ class ServiceStatus:
     state: str = "unknown"
     sub_state: str = ""
     pid: int = 0
+    #: When the unit last became active, as systemd prints it. Usable with
+    #: ``journalctl --since`` to read just the current run.
+    since: str = ""
     error: str = ""
 
     @property
@@ -76,6 +79,7 @@ class ServiceController:
             result = _run([
                 self._systemctl, "show", self.unit,
                 "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "LoadState",
+                "-p", "ActiveEnterTimestamp",
             ])
         except (OSError, subprocess.SubprocessError) as exc:
             return ServiceStatus(error=str(exc))
@@ -101,6 +105,7 @@ class ServiceController:
             state=active_state,
             sub_state=values.get("SubState", ""),
             pid=pid,
+            since=values.get("ActiveEnterTimestamp", ""),
         )
 
     def service_user(self) -> str:

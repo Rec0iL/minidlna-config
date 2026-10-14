@@ -29,7 +29,16 @@ This does those parts for you.
   a folder that is shared but empty from one that is genuinely serving files.
 - **Applies in one step.** Saving and restarting minidlna happen together,
   behind a single authorisation prompt.
-- **Leaves the rest of your config alone.** Only `media_dir=` lines are
+- **Explains what went wrong.** The Problems view reads minidlna's log and
+  groups it — "107 `.ts` files could not be read", "folder not accessible" —
+  with a likely cause for each, and can check every folder against the index.
+- **Notices drives coming back.** minidlna skips folders that are not mounted
+  when it starts. The app spots when one appears and offers to rebuild.
+- **Shows who is connected**, and what is streaming right now.
+- **Edits the other settings people change**, and keeps a browsable history of
+  your configuration so a bad edit can be rolled back.
+- **Lives in the tray** if you want it to, with scan and drive notifications.
+- **Leaves the rest of your config alone.** Only the lines you change are
   rewritten; comments, ordering and every other setting stay exactly as they
   were.
 
@@ -99,6 +108,53 @@ say why. The database is opened read-only and is never modified.
 
 ![The folder picker, with mounted drives in the sidebar](docs/screenshot-picker.png)
 
+### Problems
+
+The **Problems** tab has three parts.
+
+- **Problems** turns the log into a short list, each with what it means and
+  what to do. Hundreds of identical warnings become one entry with a count and
+  where they came from. Choose between "since last start" and the last seven
+  days.
+- **Library check** walks each folder and compares it with the index, then
+  sorts the differences: files minidlna tried and could not read (with its
+  reason), files it never picked up, and index entries whose file is gone. Run
+  it when a folder looks short.
+- **Log** is the raw log, filtered to hide routine messages, searchable and
+  copyable.
+
+A dot on the tab means the current run has warnings or errors.
+
+### Devices
+
+The **Devices** tab lists the clients talking to minidlna: what it classified
+them as, their address and hardware address, whether they are connected now,
+and — from the open connections — how fast they are streaming. Devices that
+only announced themselves on the network are listed too, so "is my TV even
+reaching the server" has an answer.
+
+### Settings
+
+Server name, port, network interface, announce interval, DLNA strictness, file
+watching, the library's top level, album art names, and the database and log
+locations can be edited without opening the file. Only the keys you change are
+touched, and risky ones (the port, the database folder) ask first.
+
+**Restore a previous version…** shows every saved copy of `minidlna.conf`
+next to what is different from the current file, and restores the one you pick.
+
+The app's own options are here too: a tray icon, closing to the tray,
+notifications, and rebuilding the library automatically when a missing drive
+returns.
+
+### Missing drives
+
+minidlna decides which media folders exist when it starts. A drive that is
+mounted later is skipped until the next restart, and nothing says so. The app
+reads the start-up log, and when a folder that was skipped shows up it tells
+you, with a button to rebuild. A folder that disappears while the server is
+running is flagged the same way.
+
 ### Why a folder shows up empty
 
 minidlna runs as its own user account, not as you. If that account cannot read
@@ -112,9 +168,10 @@ means a removable or network drive is not mounted.
 
 ## How your configuration is treated
 
-Only `media_dir=` lines are ever rewritten, in the place the old ones were, so
-the comments around them still make sense. Loading and re-saving without
-making a change reproduces the file byte for byte.
+Only the lines you change are rewritten — `media_dir=` entries and any
+setting you edited — in the place the old ones were, so the comments around
+them still make sense. Loading and re-saving without making a change
+reproduces the file byte for byte.
 
 Writes are atomic: the new file is written alongside the old one and swapped
 into place, so an interrupted save cannot leave you with a truncated config.
